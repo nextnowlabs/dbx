@@ -1,0 +1,62 @@
+name: Sync with upstream
+
+# 把本 fork 的 main force-mirror 到上游 t8y2/dbx:main。
+#
+# 背景：上游的 contributors 定时任务在 fork 里同样会跑，每天在 main 上产生一个
+# "chore(docs): refresh contributor activity" 提交，导致 fork 与上游分叉，手动同步
+# 时会在 docs/data/contributors.json 上冲突。
+#
+# 本 workflow 定时把 main 覆盖成上游最新，并在覆盖后把自己这个文件重新加回提交里
+# —— 否则同步会把 workflow 自身删掉，定时任务从此再也不会触发。
+on:
+  schedule:
+    # 每天 4 次。上游 contributors 任务的 18:00 定时实测经常拖到 20:00-23:00 才跑，
+    # 跑一次不够稳，多跑几次保证漂移不超过 6 小时。
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Mirror upstream/main
+        run: |
+          set -euo pipefail
+
+          UPSTREAM_URL="https://github.com/t8y2/dbx.git"
+          SELF=".github/workflows/sync-upstream.yml"
+
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null \
+            || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream main
+
+          # 除本 workflow 外已与上游一致 -> 不做无意义的提交
+          if git diff --quiet upstream/main HEAD -- . ":(exclude)$SELF"; then
+            echo "::notice::main 已与上游一致，跳过。"
+            exit 0
+          fi
+
+          echo "main 与上游不一致，开始镜像。"
+          cp "$SELF" "$RUNNER_TEMP/sync-upstream.yml"
+
+          git reset --hard upstream/main
+          mkdir -p "$(dirname "$SELF")"
+          cp "$RUNNER_TEMP/sync-upstream.yml" "$SELF"
+          git add "$SELF"
+
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "chore(ci): sync fork with upstream/main"
+          git push --force origin main
